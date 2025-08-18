@@ -1,0 +1,443 @@
+--// Prime Vip – Smooth Orbit (Auto Farm Boss + Spin Around + Auto Attack + Health Bar + Boss Head HP)
+-- Mô tả: Thanh máu trong menu + thanh máu nổi trên đầu boss (bắt đầu 15000 HP, giảm khi Humanoid.Health giảm)
+
+--== Services ==--
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local VirtualUser = game:GetService("VirtualUser")
+
+local LocalPlayer = Players.LocalPlayer
+
+--== Safe CoreGui parent ==--
+local function getGuiParent()
+local ok, core = pcall(function() return game:GetService("CoreGui") end)
+if ok and core then return core end
+return LocalPlayer:WaitForChild("PlayerGui")
+end
+
+--== State ==--
+local farmBoss = false
+local orbitRadius = 10
+local orbitSpeed = 2
+local attackDelay = 0.12
+local smoothFollow = 10
+local yOffset = 0
+local currentBoss = nil
+local angle = 0
+local lastAttack = 0
+local retargetInterval = 0.7
+local lastRetarget = 0
+local noclip = true
+
+--== Boss Head HP state (để hiển thị 15000 HP cố định và giảm khi boss bị đánh) ==--
+local bossMaxHP = 15000
+local bossCurrentHP = bossMaxHP
+local bossHeadGui = nil
+local bossHeadBar = nil
+local bossHeadText = nil
+local prevHumHealth = nil
+
+--== Utils ==--
+local function isAliveModel(model)
+if not model or not model.Parent then return false end
+local hum = model:FindFirstChildOfClass("Humanoid")
+local hrp = model:FindFirstChild("HumanoidRootPart")
+if not hum or not hrp then return false end
+if hum.Health <= 0 then return false end
+return true
+end
+
+local function getNearestBoss(originPos)
+local nearest, shortest = nil, math.huge
+for _, obj in ipairs(workspace:GetDescendants()) do
+if obj:IsA("Model") then
+if not Players:GetPlayerFromCharacter(obj) then
+local hum = obj:FindFirstChildOfClass("Humanoid")
+local hrp = obj:FindFirstChild("HumanoidRootPart")
+if hum and hrp and hum.Health > 0 then
+local d = (hrp.Position - originPos).Magnitude
+if d < shortest then
+shortest, nearest = d, obj
+end
+end
+end
+end
+end
+return nearest
+end
+
+local function getHRP()
+local char = LocalPlayer.Character
+if char then return char:FindFirstChild("HumanoidRootPart") end
+return nil
+end
+
+local function setNoClip(enabled)
+local char = LocalPlayer.Character
+if not char then return end
+for _, p in ipairs(char:GetDescendants()) do
+if p:IsA("BasePart") then
+p.CanCollide = not enabled
+end
+end
+end
+
+--== Boss head Billboard UI ==--
+local function destroyBossHeadGui()
+if bossHeadGui and bossHeadGui.Parent then
+pcall(function() bossHeadGui:Destroy() end)
+end
+bossHeadGui = nil
+bossHeadBar = nil
+bossHeadText = nil
+prevHumHealth = nil
+bossCurrentHP = bossMaxHP
+end
+
+local function createBossHealthBar(boss)
+destroyBossHeadGui()
+local head = boss:FindFirstChild("Head") or boss:FindFirstChild("HumanoidRootPart")
+if not head then return end
+
+local billboard = Instance.new("BillboardGui")  
+billboard.Name = "PrimeVip_BossHP"  
+billboard.Size = UDim2.new(0, 140, 0, 20)  
+billboard.StudsOffset = Vector3.new(0, 3.5, 0)  
+billboard.AlwaysOnTop = true  
+billboard.MaxDistance = 200  
+billboard.Parent = head  
+
+local bg = Instance.new("Frame", billboard)  
+bg.Name = "BG"  
+bg.Size = UDim2.new(1, 0, 1, 0)  
+bg.BackgroundColor3 = Color3.fromRGB(50, 50, 50)  
+bg.BorderSizePixel = 0  
+bg.AnchorPoint = Vector2.new(0.5, 0.5)  
+bg.Position = UDim2.new(0.5, 0, 0.5, 0)  
+local bgCorner = Instance.new("UICorner", bg)  
+bgCorner.CornerRadius = UDim.new(0, 6)  
+
+local bar = Instance.new("Frame", bg)  
+bar.Name = "Bar"  
+bar.Size = UDim2.new(1, 0, 1, 0)  
+bar.Position = UDim2.new(0, 0, 0, 0)  
+bar.BackgroundColor3 = Color3.fromRGB(200, 50, 50)  
+bar.BorderSizePixel = 0  
+local barCorner = Instance.new("UICorner", bar)  
+barCorner.CornerRadius = UDim.new(0, 6)  
+
+local txt = Instance.new("TextLabel", bg)  
+txt.Name = "HPText"  
+txt.Size = UDim2.new(1, 0, 1, 0)  
+txt.BackgroundTransparency = 1  
+txt.TextColor3 = Color3.fromRGB(255, 255, 255)  
+txt.TextScaled = true  
+txt.Font = Enum.Font.GothamBold  
+txt.Text = string.format("HP: %d/%d", bossCurrentHP, bossMaxHP)  
+
+bossHeadGui = billboard  
+bossHeadBar = bar  
+bossHeadText = txt  
+-- prevHumHealth will be set by caller after getting Humanoid  
+return bossHeadBar, bossHeadText
+
+end
+
+--== GUI (menu) ==--
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.ResetOnSpawn = false
+ScreenGui.Name = "PrimeVip_SmoothOrbit"
+ScreenGui.Parent = getGuiParent()
+
+local IconButton = Instance.new("TextButton")
+IconButton.Size = UDim2.new(0, 40, 0, 40)
+IconButton.Position = UDim2.new(0, 10, 0, 10)
+IconButton.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+IconButton.Text = "☠️"
+IconButton.TextSize = 22
+IconButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+IconButton.Font = Enum.Font.GothamBold
+IconButton.BorderSizePixel = 0
+IconButton.Parent = ScreenGui
+Instance.new("UICorner", IconButton).CornerRadius = UDim.new(0, 8)
+
+local MainFrame = Instance.new("Frame")
+MainFrame.Size = UDim2.new(0, 180, 0, 250)
+MainFrame.Position = UDim2.new(0, -190, 0.3, 0)
+MainFrame.BackgroundColor3 = Color3.fromRGB(10, 10, 10)
+MainFrame.Visible = false
+MainFrame.Active = true
+MainFrame.Draggable = true
+MainFrame.Parent = ScreenGui
+Instance.new("UICorner", MainFrame).CornerRadius = UDim.new(0, 10)
+
+local Title = Instance.new("TextLabel", MainFrame)
+Title.Size = UDim2.new(1, -10, 0, 26)
+Title.Position = UDim2.new(0, 10, 0, 6)
+Title.BackgroundTransparency = 1
+Title.Text = "🔥 Prime Vip – Orbit"
+Title.TextSize = 16
+Title.Font = Enum.Font.GothamBold
+Title.TextColor3 = Color3.fromRGB(255, 230, 0)
+Title.TextXAlignment = Enum.TextXAlignment.Left
+
+-- Farm button
+local FarmBossButton = Instance.new("TextButton", MainFrame)
+FarmBossButton.Size = UDim2.new(0, 160, 0, 30)
+FarmBossButton.Position = UDim2.new(0, 10, 0, 38)
+FarmBossButton.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+FarmBossButton.Text = "👹 Farm Boss: OFF"
+FarmBossButton.TextSize = 14
+FarmBossButton.TextColor3 = Color3.fromRGB(255, 255, 255)
+FarmBossButton.Font = Enum.Font.Gotham
+Instance.new("UICorner", FarmBossButton).CornerRadius = UDim.new(0, 8)
+
+-- Input boxes
+local DistanceBox = Instance.new("TextBox", MainFrame)
+DistanceBox.Size = UDim2.new(0, 160, 0, 28)
+DistanceBox.Position = UDim2.new(0, 10, 0, 78)
+DistanceBox.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+DistanceBox.PlaceholderText = "Khoảng cách (mặc định 10)"
+DistanceBox.Text = ""
+DistanceBox.TextColor3 = Color3.fromRGB(255, 255, 255)
+DistanceBox.Font = Enum.Font.Gotham
+DistanceBox.TextSize = 14
+Instance.new("UICorner", DistanceBox).CornerRadius = UDim.new(0, 8)
+
+local SpeedBox = Instance.new("TextBox", MainFrame)
+SpeedBox.Size = UDim2.new(0, 160, 0, 28)
+SpeedBox.Position = UDim2.new(0, 10, 0, 112)
+SpeedBox.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+SpeedBox.PlaceholderText = "Tốc độ quay (mặc định 2)"
+SpeedBox.Text = ""
+SpeedBox.TextColor3 = Color3.fromRGB(255, 255, 255)
+SpeedBox.Font = Enum.Font.Gotham
+SpeedBox.TextSize = 14
+Instance.new("UICorner", SpeedBox).CornerRadius = UDim.new(0, 8)
+
+local HeightBox = Instance.new("TextBox", MainFrame)
+HeightBox.Size = UDim2.new(0, 160, 0, 28)
+HeightBox.Position = UDim2.new(0, 10, 0, 146)
+HeightBox.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+HeightBox.PlaceholderText = "Độ cao so với boss (mặc định 0)"
+HeightBox.Text = ""
+HeightBox.TextColor3 = Color3.fromRGB(255, 255, 255)
+HeightBox.Font = Enum.Font.Gotham
+HeightBox.TextSize = 14
+Instance.new("UICorner", HeightBox).CornerRadius = UDim.new(0, 8)
+
+-- Boss label
+local BossLabel = Instance.new("TextLabel", MainFrame)
+BossLabel.Size = UDim2.new(0, 160, 0, 20)
+BossLabel.Position = UDim2.new(0, 10, 0, 180)
+BossLabel.BackgroundTransparency = 1
+BossLabel.Text = "Boss: (chưa chọn)"
+BossLabel.TextSize = 13
+BossLabel.Font = Enum.Font.Gotham
+BossLabel.TextColor3 = Color3.fromRGB(180, 220, 255)
+BossLabel.TextXAlignment = Enum.TextXAlignment.Left
+
+-- 🔴 Thanh máu boss (menu)
+local HealthFrame = Instance.new("Frame", MainFrame)
+HealthFrame.Size = UDim2.new(0, 160, 0, 18)
+HealthFrame.Position = UDim2.new(0, 10, 0, 200)
+HealthFrame.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+Instance.new("UICorner", HealthFrame).CornerRadius = UDim.new(0, 6)
+
+local HealthBar = Instance.new("Frame", HealthFrame)
+HealthBar.Size = UDim2.new(0, 0, 1, 0)
+HealthBar.BackgroundColor3 = Color3.fromRGB(200, 50, 50)
+Instance.new("UICorner", HealthBar).CornerRadius = UDim.new(0, 6)
+
+local HealthText = Instance.new("TextLabel", HealthFrame)
+HealthText.Size = UDim2.new(1, 0, 1, 0)
+HealthText.BackgroundTransparency = 1
+HealthText.Text = "HP: 0%"
+HealthText.TextColor3 = Color3.fromRGB(255, 255, 255)
+HealthText.TextSize = 12
+HealthText.Font = Enum.Font.Gotham
+
+-- Noclip toggle
+local NoClipToggle = Instance.new("TextButton", MainFrame)
+NoClipToggle.Size = UDim2.new(0, 160, 0, 24)
+NoClipToggle.Position = UDim2.new(0, 10, 0, 225)
+NoClipToggle.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+NoClipToggle.Text = "🚫 Noclip: ON"
+NoClipToggle.TextSize = 13
+NoClipToggle.TextColor3 = Color3.fromRGB(255, 255, 255)
+NoClipToggle.Font = Enum.Font.Gotham
+Instance.new("UICorner", NoClipToggle).CornerRadius = UDim.new(0, 8)
+
+--== Menu toggle ==--
+local menuVisible = false
+IconButton.MouseButton1Click:Connect(function()
+menuVisible = not menuVisible
+if menuVisible then
+MainFrame.Visible = true
+TweenService:Create(MainFrame, TweenInfo.new(0.25), {Position = UDim2.new(0, 10, MainFrame.Position.Y.Scale, MainFrame.Position.Y.Offset)}):Play()
+else
+local t = TweenService:Create(MainFrame, TweenInfo.new(0.25), {Position = UDim2.new(0, -190, MainFrame.Position.Y.Scale, MainFrame.Position.Y.Offset)})
+t:Play()
+t.Completed:Connect(function() MainFrame.Visible = false end)
+end
+end)
+
+--== Inputs ==--
+FarmBossButton.MouseButton1Click:Connect(function()
+farmBoss = not farmBoss
+FarmBossButton.Text = "👹 Farm Boss: " .. (farmBoss and "ON" or "OFF")
+if farmBoss then
+local hrp = getHRP()
+if hrp then
+currentBoss = getNearestBoss(hrp.Position)
+if currentBoss and isAliveModel(currentBoss) then
+BossLabel.Text = "Boss: " .. (currentBoss.Name or "(?)")
+-- Tạo boss head HP khi chọn boss
+bossCurrentHP = bossMaxHP
+prevHumHealth = nil
+createBossHealthBar(currentBoss)
+-- set prevHumHealth nếu có humanoid
+local hum = currentBoss:FindFirstChildOfClass("Humanoid")
+if hum then prevHumHealth = hum.Health end
+else
+BossLabel.Text = "Boss: (không thấy)"
+end
+end
+if noclip then setNoClip(true) end
+else
+BossLabel.Text = "Boss: (tắt)"
+setNoClip(false)
+destroyBossHeadGui()
+end
+end)
+
+NoClipToggle.MouseButton1Click:Connect(function()
+noclip = not noclip
+NoClipToggle.Text = "🚫 Noclip: " .. (noclip and "ON" or "OFF")
+setNoClip(noclip and farmBoss)
+end)
+
+DistanceBox.FocusLost:Connect(function()
+local n = tonumber(DistanceBox.Text)
+if n and n > 0 then orbitRadius = math.clamp(n, 2, 200) end
+DistanceBox.Text = ""
+end)
+
+SpeedBox.FocusLost:Connect(function()
+local n = tonumber(SpeedBox.Text)
+if n and n > 0 then orbitSpeed = math.clamp(n, 0.2, 12) end
+SpeedBox.Text = ""
+end)
+
+HeightBox.FocusLost:Connect(function()
+local n = tonumber(HeightBox.Text)
+if n then yOffset = math.clamp(n, -50, 50) end
+HeightBox.Text = ""
+end)
+
+UserInputService.InputBegan:Connect(function(input, gpe)
+if gpe then return end
+if input.KeyCode == Enum.KeyCode.F then
+FarmBossButton:Activate()
+end
+end)
+
+--== Core orbit ==--
+RunService.Heartbeat:Connect(function(dt)
+if not farmBoss then return end
+local hrp = getHRP()
+if not hrp then return end
+
+lastRetarget = lastRetarget + dt  
+if (not currentBoss) or (not isAliveModel(currentBoss)) or lastRetarget >= retargetInterval then  
+    lastRetarget = 0  
+    local nearest = getNearestBoss(hrp.Position)  
+    if nearest and isAliveModel(nearest) and nearest ~= currentBoss then  
+        -- đổi boss: hủy gui cũ, reset HP hiển thị, tạo gui mới  
+        destroyBossHeadGui()  
+        currentBoss = nearest  
+        BossLabel.Text = "Boss: " .. (currentBoss.Name or "(?)")  
+        bossCurrentHP = bossMaxHP  
+        prevHumHealth = nil  
+        createBossHealthBar(currentBoss)  
+        local hum = currentBoss:FindFirstChildOfClass("Humanoid")  
+        if hum then prevHumHealth = hum.Health end  
+    end  
+end  
+if not (currentBoss and isAliveModel(currentBoss)) then  
+    -- nếu boss chết/xóa thì đảm bảo xóa head gui  
+    destroyBossHeadGui()  
+    return  
+end  
+
+local bossHRP = currentBoss:FindFirstChild("HumanoidRootPart")  
+local hum = currentBoss:FindFirstChildOfClass("Humanoid")  
+if not bossHRP or not hum then  
+    destroyBossHeadGui()  
+    return  
+end  
+
+-- 🔴 Update thanh máu trong menu (dựa trên Humanoid)  
+local safeRatio = 0  
+if hum.MaxHealth and hum.MaxHealth > 0 then  
+    safeRatio = math.clamp(hum.Health / hum.MaxHealth, 0, 1)  
+end  
+HealthBar.Size = UDim2.new(safeRatio, 0, 1, 0)  
+HealthText.Text = string.format("HP: %d%%", math.floor(safeRatio * 100))  
+
+-- 🔴 Cập nhật bossCurrentHP dựa vào sự thay đổi Humanoid.Health (tách biệt với Humanoid.MaxHealth)  
+if prevHumHealth == nil then  
+    prevHumHealth = hum.Health  
+else  
+    local delta = prevHumHealth - hum.Health  
+    if delta > 0 then  
+        -- boss bị trừ HP -> trừ vào hiển thị 15000 HP  
+        bossCurrentHP = math.max(0, bossCurrentHP - delta)  
+    end  
+    -- update prevHumHealth (ghi nhận cả giảm hoặc tăng)  
+    prevHumHealth = hum.Health  
+end  
+
+-- Update thanh máu trên đầu boss (dựa trên bossCurrentHP / bossMaxHP)  
+if bossHeadBar and bossHeadText and bossHeadGui and bossHeadGui.Parent then  
+    local ratio = math.clamp(bossCurrentHP / bossMaxHP, 0, 1)  
+    bossHeadBar.Size = UDim2.new(ratio, 0, 1, 0)  
+    bossHeadText.Text = string.format("HP: %d/%d", math.floor(bossCurrentHP), bossMaxHP)  
+    -- ẩn gui nếu boss chết  
+    if bossCurrentHP <= 0 then  
+        destroyBossHeadGui()  
+    end  
+end  
+
+-- orbit movement  
+angle = (angle + orbitSpeed * dt) % (math.pi * 2)  
+local orbitOffset = Vector3.new(math.cos(angle) * orbitRadius, yOffset, math.sin(angle) * orbitRadius)  
+local targetPos = bossHRP.Position + orbitOffset  
+local alpha = 1 - math.exp(-smoothFollow * dt)  
+local newPos = hrp.Position:Lerp(targetPos, alpha)  
+hrp.CFrame = CFrame.new(newPos, bossHRP.Position)  
+hrp.AssemblyLinearVelocity = Vector3.zero  
+hrp.AssemblyAngularVelocity = Vector3.zero  
+
+-- auto attack  
+lastAttack = lastAttack + dt  
+if lastAttack >= attackDelay then  
+    lastAttack = 0  
+    pcall(function()  
+        VirtualUser:CaptureController()  
+        VirtualUser:ClickButton1(Vector2.new())  
+    end)  
+end
+
+end)
+
+LocalPlayer.CharacterAdded:Connect(function(char)
+char:WaitForChild("HumanoidRootPart", 10)
+if farmBoss and noclip then
+task.defer(function() setNoClip(true) end)
+end
+end)
+
+print("[PrimeVip] Smooth Orbit + HealthBar + Head HP loaded. Phím F bật/tắt nhanh."
